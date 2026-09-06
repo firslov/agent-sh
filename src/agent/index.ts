@@ -80,6 +80,7 @@ function mergeCaps(
       contextWindow: s?.contextWindow ?? p?.contextWindow,
       maxTokens: s?.maxTokens ?? p?.maxTokens,
       echoReasoning: s?.echoReasoning ?? p?.echoReasoning,
+      modalities: s?.modalities ?? p?.modalities,
     });
   }
   return out.size > 0 ? out : undefined;
