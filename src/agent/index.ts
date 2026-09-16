@@ -292,7 +292,8 @@ export default function agentBackend(ctx: ExtensionContext): void {
       : payloadIds.length > 0 ? payloadIds : fallbackIds;
     return {
       id,
-      apiKey: s?.apiKey ?? p?.apiKey,
+      // keys.json fallback for settings-only providers (auth login)
+      apiKey: s?.apiKey ?? p?.apiKey ?? resolveApiKey(id).key ?? undefined,
       baseURL: s?.baseURL ?? p?.baseURL,
       defaultModel: s?.defaultModel ?? p?.defaultModel ?? modelIds[0],
       models: modelIds,
