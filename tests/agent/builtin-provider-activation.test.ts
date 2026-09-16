@@ -105,3 +105,16 @@ test("custom settings provider with both key and endpoint registers", async () =
   const ash = result.backendRegistrations.find((b) => b.name === "ash");
   assert.ok(ash, `ash should register a fully-configured custom provider; got ${JSON.stringify(result)}`);
 });
+
+test("custom settings provider keyed via keys.json (auth login) registers", async () => {
+  const result = await run({
+    keys: { myproxy: "sk-from-auth-login" },
+    settings: {
+      defaultProvider: "myproxy",
+      providers: { myproxy: { baseURL: "https://proxy.local/v1", defaultModel: "m1" } },
+    },
+  });
+  const ash = result.backendRegistrations.find((b) => b.name === "ash");
+  assert.ok(ash, `ash should pick up the keys.json key for a settings-only provider; got ${JSON.stringify(result)}`);
+  assert.doesNotMatch(result.uiErrors.join("\n"), /no API key/i);
+});

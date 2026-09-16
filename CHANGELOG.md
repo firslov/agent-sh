@@ -8,6 +8,13 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- Custom providers declared under `providers` in `settings.json` now pick up keys
+  stored with `agent-sh auth login <id>`. Previously only an `apiKey` in
+  `settings.json` was read, so the provider stayed hidden even though
+  `auth list` reported it as configured.
+
 ## [0.15.11] - 2026-08-30
 
 ### Added
