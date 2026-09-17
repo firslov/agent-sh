@@ -8,12 +8,18 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+## [0.15.12] - 2026-09-17
+
 ### Fixed
 
 - Custom providers declared under `providers` in `settings.json` now pick up keys
   stored with `agent-sh auth login <id>`. Previously only an `apiKey` in
   `settings.json` was read, so the provider stayed hidden even though
   `auth list` reported it as configured.
+- Settings-declared model `modalities` for hand-configured (openai-compatible)
+  providers are no longer dropped when merged with the provider's built-in
+  catalog capabilities. Purely hand-configured providers previously never
+  exposed their modalities through `agent:get-models`.
 
 ## [0.15.11] - 2026-08-30
 
