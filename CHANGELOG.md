@@ -8,6 +8,8 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+## [0.15.13] - 2026-09-18
+
 ### Fixed
 
 - A query submitted while another one was still finishing is cancellable again.
