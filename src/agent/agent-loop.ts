@@ -894,8 +894,9 @@ export class AgentLoop implements AgentBackend {
     if (this.abortController) {
       this.abortController.abort();
     }
-    this.abortController = new AbortController();
-    const signal = this.abortController.signal;
+    const controller = new AbortController();
+    this.abortController = controller;
+    const signal = controller.signal;
     // Each loop iteration adds an abort listener (via OpenAI SDK stream);
     // disable the limit — long-running tool loops can easily exceed any cap.
     setMaxListeners(0, signal);
@@ -934,6 +935,10 @@ export class AgentLoop implements AgentBackend {
         this.bus.emit("agent:error", { message: msg });
       }
     } finally {
+      // Listeners below can submit the next query synchronously (ashi drains its
+      // queue on processing-done), installing their own controller — only clear ours.
+      if (this.abortController === controller) this.abortController = null;
+
       if (signal.aborted && signal.reason !== "silent") {
         this.bus.emit("agent:cancelled", {});
       }
@@ -948,8 +953,6 @@ export class AgentLoop implements AgentBackend {
         response: responseText,
       });
       this.bus.emit("agent:processing-done", {});
-      this.abortController = null;
-
     }
   }
 
