@@ -8,6 +8,15 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- A query submitted while another one was still finishing is cancellable again.
+  The finishing query cleared the shared abort controller unconditionally, wiping
+  the one the follow-up had just installed, so `agent:cancel-request` became a
+  no-op for that whole turn — Esc did nothing at all while a tool kept running.
+  Frontends that drain a queued message on `agent:processing-done` (ashi) hit
+  this whenever a follow-up was typed during a turn.
+
 ## [0.15.12] - 2026-09-17
 
 ### Fixed
