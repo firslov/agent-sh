@@ -295,6 +295,8 @@ A backend listens for input events and emits output events. The TUI and all exte
 | Event | Payload | Description |
 |---|---|---|
 | `agent:submit` | `{ query }` | User submitted a query |
+| `agent:steer` | `{ text, images? }` | Message for the turn already running — injected before its next set of tool calls. Falls back to `agent:submit` when idle. Backends that can't inject mid-turn may treat it as a queued query |
+| `agent:steer-cancel` | `{}` | Drop the most recently queued steering message |
 | `agent:cancel-request` | `{ silent? }` | User requested cancellation |
 | `agent:reset-session` | `{}` | User issued reset — clear conversation state |
 
@@ -307,6 +309,11 @@ A backend listens for input events and emits output events. The TUI and all exte
 | 3 | `agent:response-chunk` | `{ blocks: ContentBlock[] }` | Use `emitTransform` so content pipeline runs. Emit 0+ times |
 | 4 | `agent:response-done` | `{ response }` | Full response text |
 | 5 | `agent:processing-done` | `{}` | Stops spinner, returns control to prompt |
+
+Steering acknowledgements (ash emits these; a frontend renders its queue from them):
+`agent:steer-queued` `{ text, depth }`, `agent:steer-consumed` `{ text, depth }` — followed by a normal
+`agent:query` for the injected message — and `agent:steer-dropped` `{ texts, reason }` when the user
+unqueues one or the turn is cancelled.
 
 **Optional events** for richer backends:
 

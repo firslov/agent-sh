@@ -38,6 +38,11 @@ declare module "../core/event-bus.js" {
     "agent:submit": { query: string; images?: ImageContent[] };
     "agent:cancel-request": { silent?: boolean };
     "agent:append-user-message": { text: string };
+    "agent:steer": { text: string; images?: ImageContent[] };
+    "agent:steer-cancel": Record<string, never>;
+    "agent:steer-queued": { text: string; depth: number };
+    "agent:steer-consumed": { text: string; depth: number };
+    "agent:steer-dropped": { texts: string[]; reason: "cancelled" | "aborted" };
     "agent:query": { query: string };
     "agent:reset-session": Record<string, never>;
     "agent:compact-request": Record<string, never>;
