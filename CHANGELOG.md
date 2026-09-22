@@ -8,6 +8,8 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+## [0.15.14] - 2026-09-22
+
 ### Added
 
 - Mid-turn steering. `agent:steer` adds a message to the turn already running:
@@ -28,9 +30,10 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 - ashi: a message typed during a turn now steers that turn instead of waiting
   for `agent:processing-done`. The `↳ queued:` line and Up-to-unqueue behave as
-  before, and cancelling a turn returns the queued text (with its images) to the
-  input. Backends that do not handle `agent:steer` — the claude-code, opencode
-  and pi bridges — keep the previous drain-on-turn-end behavior.
+  before. Cancelling a turn puts the first queued message (with its images) back
+  in the input and discards any others with a notice. Backends that do not
+  handle `agent:steer` — the claude-code, opencode and pi bridges — keep the
+  previous drain-on-turn-end behavior.
 
 ## [0.15.13] - 2026-09-18
 
