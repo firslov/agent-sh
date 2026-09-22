@@ -8,6 +8,30 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+### Added
+
+- Mid-turn steering. `agent:steer` adds a message to the turn already running:
+  ash injects it at the next loop boundary — after the running tool batch has
+  landed in full (parallel calls included) and before the model is asked for the
+  next set of tool calls — instead of holding it until the turn ends. A message
+  steered in while the final answer streams keeps the loop going for one more
+  round rather than sitting unanswered in history, and one left over when a turn
+  is cancelled is handed back instead of replayed. With no turn in flight it
+  behaves like `agent:submit`.
+- `agent:steer-cancel` unqueues the most recent steering message.
+  `agent:steer-queued`, `agent:steer-consumed` and `agent:steer-dropped` report
+  the queue so a frontend can render it; a consumed message is also announced
+  with the usual `agent:query` and `conversation:message-appended`, so it
+  displays and persists like any other user message.
+
+### Changed
+
+- ashi: a message typed during a turn now steers that turn instead of waiting
+  for `agent:processing-done`. The `↳ queued:` line and Up-to-unqueue behave as
+  before, and cancelling a turn returns the queued text (with its images) to the
+  input. Backends that do not handle `agent:steer` — the claude-code, opencode
+  and pi bridges — keep the previous drain-on-turn-end behavior.
+
 ## [0.15.13] - 2026-09-18
 
 ### Fixed

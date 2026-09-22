@@ -72,6 +72,7 @@ export class AgentLoop implements AgentBackend {
   private boundListeners: Array<{ event: string; fn: (...args: any[]) => void }> = [];
   private boundPipeListeners: Array<{ event: string; fn: (...args: any[]) => any; async: boolean }> = [];
   private lastProjectSkillNames = new Set<string>();
+  private steerQueue: Array<{ text: string; images?: ImageContent[] }> = [];
 
   // ── Session telemetry: per-session behavioral counters ──
   // Exposed to extensions via the agent:get-* handlers below.
@@ -183,6 +184,18 @@ export class AgentLoop implements AgentBackend {
     });
     on("agent:cancel-request", (e) => {
       this.abortController?.abort(e.silent ? "silent" : undefined);
+    });
+    on("agent:steer", ({ text, images }) => {
+      if (!this.abortController) {
+        this.handleQuery(text, images).catch(() => {});
+        return;
+      }
+      this.steerQueue.push({ text, images });
+      this.bus.emit("agent:steer-queued", { text, depth: this.steerQueue.length });
+    });
+    on("agent:steer-cancel", () => {
+      const last = this.steerQueue.pop();
+      if (last) this.bus.emit("agent:steer-dropped", { texts: [last.text], reason: "cancelled" });
     });
     on("agent:append-user-message", ({ text }) => {
       this.conversation.appendUserMessage(text);
@@ -939,6 +952,12 @@ export class AgentLoop implements AgentBackend {
       // queue on processing-done), installing their own controller — only clear ours.
       if (this.abortController === controller) this.abortController = null;
 
+      if (this.steerQueue.length > 0) {
+        const texts = this.steerQueue.map((m) => m.text);
+        this.steerQueue = [];
+        this.bus.emit("agent:steer-dropped", { texts, reason: "aborted" });
+      }
+
       if (signal.aborted && signal.reason !== "silent") {
         this.bus.emit("agent:cancelled", {});
       }
@@ -953,6 +972,24 @@ export class AgentLoop implements AgentBackend {
         response: responseText,
       });
       this.bus.emit("agent:processing-done", {});
+    }
+  }
+
+  private drainSteerQueue(): void {
+    if (this.steerQueue.length === 0) return;
+    const queued = this.steerQueue;
+    this.steerQueue = [];
+    for (let i = 0; i < queued.length; i++) {
+      const { text, images } = queued[i]!;
+      let steerImages = images?.length ? images : undefined;
+      if (steerImages && !this.activeModel.modalities?.includes("image")) {
+        this.bus.emit("ui:info", { message: `Current model has no declared image support — ${steerImages.length} image(s) dropped.` });
+        steerImages = undefined;
+      }
+      this.conversation.addUserMessage(text, steerImages);
+      this.bus.emit("agent:query", { query: text });
+      this.bus.emit("conversation:message-appended", { role: "user", content: text });
+      this.bus.emit("agent:steer-consumed", { text, depth: queued.length - i - 1 });
     }
   }
 
@@ -973,6 +1010,8 @@ export class AgentLoop implements AgentBackend {
     let lastCwd = this.handlers.call("cwd") as string;
 
     while (!signal.aborted) {
+      this.drainSteerQueue();
+
       // Auto-compact when total context approaches the window limit.
       const totalEstimate = this.conversation.estimatePromptTokens();
       const contextWindow = this.activeModel.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
@@ -1027,7 +1066,8 @@ export class AgentLoop implements AgentBackend {
       if (signal.aborted) break;
 
       if (toolCalls.length === 0) {
-        break;
+        if (this.steerQueue.length === 0) break;
+        continue;
       }
 
       // Emit batch info so the TUI can render group headers upfront

@@ -59,7 +59,7 @@ Tools run without confirmation by default; to gate them, register tool advisors 
 | `extensionContext(opts)` | Creates an `ExtensionContext` — use this to load extensions in library mode |
 | `kill()` | Clean shutdown |
 
-Send queries with `bus.emit("agent:submit", { query })`; cancel with `bus.emit("agent:cancel-request", { silent: false })`.
+Send queries with `bus.emit("agent:submit", { query })`; cancel with `bus.emit("agent:cancel-request", { silent: false })`. To add a message to a turn that is already running, emit `agent:steer` instead — ash injects it before the turn's next set of tool calls.
 
 ## Loading Extensions in Library Mode
 

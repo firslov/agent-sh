@@ -421,6 +421,7 @@ export function mountAshi(
   const dispatchAgentQuery = (query: string, images: PendingImage[]): void => {
     if (processing) {
       queuedQueries.push({ query, images });
+      bus.emit("agent:steer", { text: query, images: images.length ? toImageContent(images) : undefined });
       renderQueueSlot();
       app.requestRender();
       return;
@@ -669,6 +670,27 @@ export function mountAshi(
     app.requestRender();
   });
 
+  bus.on("agent:steer-consumed", () => {
+    queuedQueries.shift();
+    renderQueueSlot();
+    app.requestRender();
+  });
+
+  bus.on("agent:steer-dropped", ({ texts, reason }) => {
+    if (reason === "cancelled") return;
+    const dropped = queuedQueries.splice(Math.max(0, queuedQueries.length - texts.length), texts.length);
+    const restore = dropped[0];
+    if (restore && input.getText().length === 0) {
+      input.setText(restore.query);
+      pendingImages = restore.images;
+    }
+    if (dropped.length > 1) {
+      bus.emit("ui:info", { message: `(${dropped.length - 1} more queued message(s) discarded)` });
+    }
+    renderQueueSlot();
+    app.requestRender();
+  });
+
   bus.on("agent:processing-start", () => {
     processing = true;
     startLoader();
@@ -867,11 +889,9 @@ export function mountAshi(
       bus.emit("shell:pty-write", { data: item.line + "\n" });
     }
     const next = queuedQueries.shift();
+    renderQueueSlot();
     if (next !== undefined) {
-      renderQueueSlot();
       bus.emit("agent:submit", { query: next.query, images: next.images.length ? toImageContent(next.images) : undefined });
-    } else {
-      renderQueueSlot();
     }
     app.requestRender();
   });
@@ -1232,6 +1252,7 @@ export function mountAshi(
     }
     if (key.matches("up") && queuedQueries.length > 0 && input.getText().length === 0) {
       const last = queuedQueries.pop()!;
+      bus.emit("agent:steer-cancel", {});
       renderQueueSlot();
       input.setText(last.query);
       pendingImages = last.images;
