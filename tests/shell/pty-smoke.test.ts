@@ -30,6 +30,12 @@ const SHELLS: Spec[] = [
   { strategy: fishStrategy, candidates: ["/usr/bin/fish", "/usr/local/bin/fish", "/opt/homebrew/bin/fish"] },
 ];
 
+// Kill the whole group: a surviving subshell holds the pty open and hangs the run.
+function killGroup(term: pty.IPty): void {
+  try { process.kill(-term.pid, "SIGKILL"); } catch { /* already gone */ }
+  try { term.kill(); } catch { /* noop */ }
+}
+
 function findBinary(candidates: string[]): string | null {
   for (const c of candidates) {
     try {
@@ -82,7 +88,7 @@ function smokeRun(shellBin: string, strategy: ShellStrategy, timeoutMs: number):
       if (done) return;
       done = true;
       clearTimeout(timer);
-      try { term.kill(); } catch { /* noop */ }
+      killGroup(term);
       fs.rmSync(tmpDirRoot, { recursive: true, force: true });
       if (cfg.tmpDir && cfg.tmpDir !== tmpDirRoot) {
         try { fs.rmSync(cfg.tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
@@ -193,7 +199,7 @@ function preexecCountRun(shellBin: string, strategy: ShellStrategy, timeoutMs: n
       done = true;
       clearTimeout(killTimer);
       if (idleTimer) clearTimeout(idleTimer);
-      try { term.kill(); } catch { /* noop */ }
+      killGroup(term);
       fs.rmSync(tmpDirRoot, { recursive: true, force: true });
       if (cfg.tmpDir && cfg.tmpDir !== tmpDirRoot) {
         try { fs.rmSync(cfg.tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
@@ -206,8 +212,9 @@ function preexecCountRun(shellBin: string, strategy: ShellStrategy, timeoutMs: n
       data += chunk;
       // First READY = prompt rendered. Drain 800ms idle to let any spurious
       // emissions arrive, then snapshot the count before sending.
-      if (beforeCommand < 0 && READY.test(data)) {
+      if (beforeCommand < 0 && !idleTimer && READY.test(data)) {
         idleTimer = setTimeout(() => {
+          if (done) return;
           beforeCommand = (data.match(PREEXEC) ?? []).length;
           commandSent = true;
           term.write("true\r");
