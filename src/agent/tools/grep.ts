@@ -183,16 +183,20 @@ export function createGrepTool(getCwd: () => string): ToolDefinition {
 
       let output = session.output;
 
-      // Cap individual line lengths to 500 chars to prevent minified/base64 flood
+      // Cap individual line lengths to 500 UTF-16 units to prevent minified/base64 flood.
       if (mode === "content") {
         const MAX_LINE_LEN = 500;
         output = output
           .split("\n")
-          .map((line) =>
-            line.length > MAX_LINE_LEN
-              ? line.slice(0, MAX_LINE_LEN) + "… [truncated]"
-              : line,
-          )
+          .map((line) => {
+            if (line.length <= MAX_LINE_LEN) return line;
+            // Move inward if the cap splits a surrogate pair. A lone surrogate
+            // in a tool result can make strict providers reject the next request.
+            const end = (line.codePointAt(MAX_LINE_LEN - 1) ?? 0) > 0xFFFF
+              ? MAX_LINE_LEN - 1
+              : MAX_LINE_LEN;
+            return line.slice(0, end) + "… [truncated]";
+          })
           .join("\n");
       }
 
