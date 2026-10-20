@@ -479,7 +479,7 @@ Per-request producers (`mode: "per-request"`) only fire under backends that expo
 
 ## Custom Providers
 
-Providers describe the OpenAI-compatible endpoints the `ash` backend can talk to. The built-ins (openrouter, openai, openai-compatible, deepseek, ollama, zai-coding-plan, opencode) register from `src/agent/providers/`; extensions can register their own — local daemons, hosted gateways, fine-tuned model catalogs — and they show up under `agent-sh auth list` and `/model`.
+Providers describe the OpenAI-compatible endpoints the `ash` backend can talk to. The built-ins (openrouter, openai, openai-compatible, deepseek, ollama, zai-coding-plan, opencode) register from `src/agent/providers/`, and `codex` from the codex-provider built-in extension; extensions can register their own — local daemons, hosted gateways, fine-tuned model catalogs — and they show up under `agent-sh auth list` and `/model`.
 
 ```typescript
 import type { AgentContext } from "agent-sh/types";

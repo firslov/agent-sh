@@ -8,7 +8,7 @@ import {
   toResponsesRequest,
   upstreamErrorMessage,
   type ChatChunk,
-} from "../translate.js";
+} from "../../../../src/agent/extensions/codex-provider/translate.js";
 
 const IMG = "data:image/png;base64,AAAA";
 

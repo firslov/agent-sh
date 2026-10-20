@@ -142,6 +142,15 @@ agent-sh --model gpt-5.4
 agent-sh --api-key dummy --base-url http://localhost:11434/v1 --model gemma4
 ```
 
+### ChatGPT (Codex subscription)
+
+```
+/codex-login      # sign in with your ChatGPT account in the browser
+/model gpt-5.5
+```
+
+Built in, no API key needed: requests go through your ChatGPT plan's Codex limits. Set `"defaultProvider": "codex"` to make it the default. See [codex-provider](../src/agent/extensions/codex-provider/README.md) for how it works and its settings.
+
 ### OpenRouter
 
 ```bash
