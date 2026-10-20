@@ -5,8 +5,8 @@ import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { accountIdOf, beginLogin, describeAccount, LoginCancelled, TokenStore, type Credentials } from "../auth.js";
-import { resolveModels } from "../models.js";
+import { accountIdOf, beginLogin, describeAccount, LoginCancelled, TokenStore, type Credentials } from "../../../../src/agent/extensions/codex-provider/auth.js";
+import { resolveModels } from "../../../../src/agent/extensions/codex-provider/models.js";
 
 function jwt(tag: string): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");

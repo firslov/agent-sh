@@ -30,10 +30,13 @@ Releases before this file are recorded in the git tags and GitHub releases.
   `N tokens (M cached)`, and scripts can read `budget.cached`.
 - `agent-sh run file --resume` without an id continues that file's latest run,
   and a resume given no arguments repeats the earlier run's.
-- `codex-provider` example extension: use a ChatGPT (Codex) subscription as an
-  `ash` provider. A loopback proxy translates Chat Completions to the Codex
-  Responses API and signs requests with ChatGPT OAuth (`/codex-login`,
-  `/codex-status`, `/codex-logout`). Not yet tested against the live backend.
+- Built-in `codex` provider: use a ChatGPT (Codex) subscription with `ash`.
+  A loopback proxy translates Chat Completions to the Codex Responses API and
+  signs requests with ChatGPT OAuth (`/codex-login`, `/codex-status`,
+  `/codex-logout`). The proxy starts only once you're signed in; disable it
+  with `"disabledBuiltins": ["codex-provider"]`. If you installed the earlier
+  `codex-provider` example extension, remove it from `~/.agent-sh/extensions/`;
+  the existing sign-in in `~/.agent-sh/codex-provider/` carries over.
 - `agent-sh run <file> [args]` runs a workflow file directly: no shell, no TUI,
   no main-agent turn. The file can `export const config` to declare its setup
   (extra agent dirs, concurrency, run caps, a token budget, and `hours` for a

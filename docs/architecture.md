@@ -20,7 +20,7 @@ index.ts — interactive terminal frontend:
   ├── Agent host (always activated via activateAgent(ctx) before built-ins load):
   │     ash backend       — provider resolution, LlmClient, lazy AgentLoop
   │     core tools        — bash/read/write/edit/grep/glob/ls/list_skills registered at activate time
-  │     built-in providers — openrouter, openai, deepseek, ollama, zai-coding-plan, opencode (unconditional); openai-compatible when OPENAI_BASE_URL is set
+  │     built-in providers — openrouter, openai, deepseek, ollama, zai-coding-plan, opencode (unconditional); codex once signed in (codex-provider built-in extension); openai-compatible when OPENAI_BASE_URL is set
   │
   ├── Backend registry (owned by core; backends register via `agent:register-backend`):
   │     core.activateBackend() — picks the named/persisted/first backend and calls its start()

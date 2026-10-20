@@ -1,10 +1,10 @@
 /** codex-provider: ChatGPT (Codex) subscription as an ash provider via a loopback proxy. See README.md. */
 import * as crypto from "node:crypto";
 import * as path from "node:path";
-import type { ExtensionContext } from "agent-sh/types";
+import type { ExtensionContext } from "../../../shell/host-types.js";
 import { beginLogin, describeAccount, LoginCancelled, openBrowser, TokenStore, type PendingLogin } from "./auth.js";
 import { resolveModels } from "./models.js";
-import { SESSION_HEADER, startProxy } from "./proxy.js";
+import { SESSION_HEADER, startProxy, type Proxy } from "./proxy.js";
 
 const DEFAULT_UPSTREAM = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -22,15 +22,6 @@ export default async function activate(ctx: ExtensionContext): Promise<void> {
   const store = new TokenStore(path.join(ctx.getStoragePath("codex-provider"), "auth.json"));
   const secret = crypto.randomBytes(24).toString("hex");
 
-  const proxy = await startProxy({
-    secret,
-    upstreamURL: config.upstreamURL,
-    originator: config.originator,
-    getCredentials: () => store.getValid(),
-    refreshCredentials: (stale) => store.refresh(stale),
-  });
-  ctx.onDispose(() => { void proxy.close(); });
-
   const id = config.providerId;
   const models = resolveModels(config.models);
   agent.providers.configure(id, {
@@ -38,14 +29,30 @@ export default async function activate(ctx: ExtensionContext): Promise<void> {
     reasoningParams: (level) => (level === "off" ? {} : { reasoning_effort: level }),
     requestHeaders: ({ sessionId }): Record<string, string> => (sessionId ? { [SESSION_HEADER]: sessionId } : {}),
   });
-  ctx.onDispose(agent.providers.register({
-    id,
-    apiKey: secret,
-    baseURL: proxy.baseURL,
-    defaultModel: models[0]?.id,
-    models,
-    supportsReasoningEffort: true,
-  }));
+
+  // Started on first sign-in so signed-out sessions don't open a loopback port.
+  let proxy: Proxy | null = null;
+  let starting: Promise<void> | null = null;
+  ctx.onDispose(() => { void proxy?.close(); });
+  const ensureProxy = (): Promise<void> => (starting ??= startAndRegister());
+  const startAndRegister = async (): Promise<void> => {
+    proxy = await startProxy({
+      secret,
+      upstreamURL: config.upstreamURL,
+      originator: config.originator,
+      getCredentials: () => store.getValid(),
+      refreshCredentials: (stale) => store.refresh(stale),
+    });
+    ctx.onDispose(agent.providers.register({
+      id,
+      apiKey: secret,
+      baseURL: proxy.baseURL,
+      defaultModel: models[0]?.id,
+      models,
+      supportsReasoningEffort: true,
+    }));
+  };
+  if (store.load()) await ensureProxy();
 
   const info = (message: string) => ctx.bus.emit("ui:info", { message });
   const error = (message: string) => ctx.bus.emit("ui:error", { message });
@@ -72,15 +79,13 @@ export default async function activate(ctx: ExtensionContext): Promise<void> {
       info("codex-login: port 1455 is busy (another sign-in running?), so the browser can't hand back the code. "
         + "After signing in, copy the final URL from the address bar and run /codex-login <url>.");
     }
-    login.result.then(
-      (creds) => {
-        store.save(creds);
-        info(`codex-login: signed in (${describeAccount(creds)}). Provider "${id}" is ready.`);
-      },
-      (err) => {
-        if (!(err instanceof LoginCancelled)) error(`codex-login: ${(err as Error).message}`);
-      },
-    ).finally(() => {
+    login.result.then(async (creds) => {
+      store.save(creds);
+      await ensureProxy();
+      info(`codex-login: signed in (${describeAccount(creds)}). Provider "${id}" is ready.`);
+    }).catch((err) => {
+      if (!(err instanceof LoginCancelled)) error(`codex-login: ${(err as Error).message}`);
+    }).finally(() => {
       if (pending === login) pending = null;
     });
   });
@@ -97,6 +102,6 @@ export default async function activate(ctx: ExtensionContext): Promise<void> {
       ? `signed in (${describeAccount(creds)}); access token ${creds.expires > Date.now() ? "valid until" : "expired at"} `
         + `${new Date(creds.expires).toLocaleString()}, refreshed automatically`
       : "not signed in. Run /codex-login";
-    info(`codex-status: ${account}\n  provider "${id}" → ${proxy.baseURL}\n  models: ${models.map((m) => m.id).join(", ")}`);
+    info(`codex-status: ${account}\n  provider "${id}" → ${proxy?.baseURL ?? "not started"}\n  models: ${models.map((m) => m.id).join(", ")}`);
   });
 }

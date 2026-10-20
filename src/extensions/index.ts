@@ -8,7 +8,7 @@
  */
 import type { ExtensionContext } from "../shell/host-types.js";
 
-type ActivateFn = (ctx: ExtensionContext) => void;
+type ActivateFn = (ctx: ExtensionContext) => void | Promise<void>;
 
 export const BUILTIN_EXTENSIONS: Array<{
   name: string;
@@ -16,6 +16,7 @@ export const BUILTIN_EXTENSIONS: Array<{
 }> = [
   { name: "slash-commands",    load: () => import("./slash-commands/index.js").then(m => m.default) },
   { name: "file-autocomplete", load: () => import("./file-autocomplete.js").then(m => m.default) },
+  { name: "codex-provider",    load: () => import("../agent/extensions/codex-provider/index.js").then(m => m.default) },
 ];
 
 /**
@@ -31,7 +32,7 @@ export async function loadBuiltinExtensions(
   for (const ext of BUILTIN_EXTENSIONS) {
     if (disabledSet.has(ext.name)) continue;
     const activate = await ext.load();
-    activate(ctx);
+    await activate(ctx);
     loaded.push(ext.name);
   }
   return loaded;

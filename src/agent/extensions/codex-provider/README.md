@@ -2,21 +2,15 @@
 
 Use your ChatGPT subscription (the same sign-in the Codex app uses) as a provider for agent-sh's built-in agent, `ash`. It works under both `agent-sh` and `ashi`, and ash keeps its own tools and extensions. No OpenAI API key is needed.
 
-## Install
+## Setup
 
-For development, symlink the extension so edits take effect on the next launch or `/reload`:
-
-```bash
-ln -s "$PWD/examples/extensions/codex-provider" ~/.agent-sh/extensions/codex-provider
-```
-
-For a plain copy instead: `agent-sh install ./examples/extensions/codex-provider`.
-
-Then make it the default provider in `~/.agent-sh/settings.json`:
+Built in: there's nothing to install. Sign in once with `/codex-login`, then make it the default provider in `~/.agent-sh/settings.json`:
 
 ```json
 { "defaultProvider": "codex" }
 ```
+
+To turn it off, add `"codex-provider"` to `disabledBuiltins`.
 
 ## Use
 
@@ -43,7 +37,7 @@ ash (OpenAI SDK, Chat Completions)
 - **Auth** (`auth.ts`): the same PKCE flow as the Codex CLI. Tokens are stored in `~/.agent-sh/codex-provider/auth.json` (mode 0600) and refreshed shortly before they expire. Refresh tokens rotate, so refreshes take a lock file and re-read the store, which lets several agent-sh processes share one sign-in. On an upstream 401, the proxy refreshes once and retries.
 - **Models** (`models.ts`): the list comes from the Codex client's `~/.codex/models_cache.json` when it exists. Otherwise it falls back to a static list.
 
-This extension signs in on its own. It never reads or refreshes the Codex app's `~/.codex/auth.json`, so it can't sign the Codex app out.
+codex-provider signs in on its own. It never reads or refreshes the Codex app's `~/.codex/auth.json`, so it can't sign the Codex app out.
 
 ## Settings
 
@@ -58,12 +52,11 @@ Under `"codex-provider"` in `~/.agent-sh/settings.json`, all optional:
 
 ## Caveats
 
-- The Codex backend is not a documented public API. It can change without notice, and this extension may need updates when it does.
+- The Codex backend is not a documented public API. It can change without notice, and codex-provider may need updates when it does.
 - Usage counts against your ChatGPT plan's Codex limits. When you hit a limit, the error message says when it resets.
 
 ## Tests
 
 ```bash
-node --import tsx --test examples/extensions/codex-provider/tests/*.test.ts
-npx tsc -p examples/extensions/codex-provider
+node --import tsx --test tests/agent/extensions/codex-provider/*.test.ts
 ```
