@@ -24,6 +24,12 @@ jobs:
       - run: npm install
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Workspace extensions depend on agent-sh by range; npm links the root only
+      # while a published version also matches, else installs a stale copy.
+      - name: Point workspace extensions at this checkout
+        run: |
+          rm -rf node_modules/agent-sh examples/extensions/*/node_modules/agent-sh
+          ln -s .. node_modules/agent-sh
       - run: npm run build
       - run: npm test
 
