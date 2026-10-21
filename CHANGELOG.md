@@ -8,6 +8,8 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-21
+
 ### Added
 
 - Workflow files in Python: `agent-sh run campaign.py`, and `.py` files in the
@@ -17,7 +19,8 @@ Releases before this file are recorded in the git tags and GitHub releases.
   as for JavaScript files. Concurrency is plain `asyncio.gather`, cancelling a
   task stops its agent, and `returns` takes a dataclass. Needs Python 3.9+.
   The file can use Ray, Dask or submitit for its own compute while the agents
-  stay in the agent-sh process.
+  stay in the agent-sh process. A guide to writing them (`PYTHON.md`) ships
+  with the subagents extension and is registered as a skill.
 - Workflow scripts: `checkpoint(name, fn)` (Python: the `@checkpoint`
   decorator) saves the result of the script's own work, such as a test suite
   or a build, so a resumed run gets the saved result instead of doing it again.
@@ -99,6 +102,17 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 - A workflow subagent stopped by Ctrl-C or a deadline no longer counts as a
   finished run with its partial text.
+- Token estimates count each image as a flat 1600 tokens instead of reading its
+  base64 data as text. Two screenshots used to add ~94k phantom tokens and
+  trigger auto-compaction far too early. The estimate after compaction now
+  keeps the system-prompt and tools overhead, so before/after numbers compare.
+- `grep` no longer splits an emoji or other surrogate pair when it truncates a
+  long line; the lone half could make strict providers reject the next request
+  (#276, thanks @firslov).
+- Diffs of tab-indented files no longer overflow the terminal and leave
+  colored bands under changed lines; tabs expand to 4-column stops (#273).
+- A query failure's stack trace no longer prints over the TUI; it shows only
+  under `DEBUG`. Codex mid-stream errors now carry the backend's message.
 
 ## [0.15.17] - 2026-09-26
 
