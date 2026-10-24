@@ -77,6 +77,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
   let deadline: ReturnType<typeof setTimeout> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let timeoutError: Error | undefined;
+  let outputStarted = false;
   const armDeadline = (ms: number, phase: string) => {
     clearTimeout(deadline);
     deadline = setTimeout(() => {
@@ -129,9 +130,19 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
       armDeadline(opts.headersTimeoutMs!, "waiting for response headers");
       upstream = await callUpstream(opts, creds, body, sessionId, abort.signal);
     }
-    if (!upstream.ok || !upstream.body) {
-      return sendError(res, upstream.status || 502, upstreamErrorMessage(upstream.status, await upstream.text()), upstream.headers.get("retry-after") ?? undefined);
+    if (!upstream.ok) {
+      let errorBody = "";
+      try { errorBody = await upstream.text(); }
+      catch (err) {
+        if (abort.signal.aborted) throw err;
+        // A broken error body must not erase a known 4xx/5xx status or its
+        // retry policy. No model output has been sent on this path.
+      }
+      return sendError(res, upstream.status, upstreamErrorMessage(upstream.status, errorBody), upstream.headers.get("retry-after") ?? undefined);
     }
+    if (!upstream.body) throw new TransportError(Object.assign(new Error("Codex upstream returned no response body"), {
+      code: "ERR_STREAM_PREMATURE_CLOSE",
+    }), "body");
 
     const translator = new CodexStreamTranslator(chat.model);
     const upstreamBody = upstream.body;
@@ -140,9 +151,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
     // Count even SSE comments and untranslatable events as upstream activity.
     // Our own keepalives must never extend the upstream inactivity deadline.
     async function* observedBody() {
-      for await (const bytes of upstreamBody as unknown as AsyncIterable<Uint8Array>) {
-        if (bytes.length) resetIdle();
-        yield bytes;
+      try {
+        for await (const bytes of upstreamBody as unknown as AsyncIterable<Uint8Array>) {
+          if (bytes.length) resetIdle();
+          yield bytes;
+        }
+      } catch (err) {
+        throw new TransportError(err, "body");
       }
     }
     async function* checkedEvents() {
@@ -152,7 +167,9 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
         // HTTP body open. Returning also cancels the unread upstream stream.
         if (["response.completed", "response.done", "response.incomplete"].includes(event.type)) return;
       }
-      throw new Error("Codex upstream stream ended before completion");
+      throw new TransportError(Object.assign(new Error("Codex upstream stream ended before completion"), {
+        code: "ERR_STREAM_PREMATURE_CLOSE",
+      }), "body");
     }
     const events = checkedEvents();
 
@@ -163,19 +180,26 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
       return sendJson(res, 200, aggregate(chunks));
     }
 
-    const write = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    const write = (payload: unknown) => {
+      outputStarted = true;
+      return res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
     for await (const event of events) for (const chunk of translator.push(event)) write(chunk);
     for (const chunk of translator.end()) write(chunk);
     res.end("data: [DONE]\n\n");
   } catch (err) {
     if (res.destroyed) return;
     const message = errorText(timeoutError ?? err);
-    if (res.headersSent && !timeoutError) {
-      // Errors after the SSE handshake must remain errors, never partial success.
-      res.end(`data: ${JSON.stringify({ error: { message, type: "codex_error" } })}\n\n`);
-    } else {
-      sendError(res, timeoutError ? 504 : 502, message, undefined, !!timeoutError);
-    }
+    // An early local SSE handshake says nothing about upstream progress. Keep
+    // transient transport errors retryable until actual model output is sent.
+    // Replaying after text, reasoning or tool deltas would duplicate UI output;
+    // provider/application errors and spent local deadlines must not be retried.
+    const transport = err instanceof TransportError ? err : undefined;
+    sendError(res, timeoutError ? 504 : 502, message, undefined, {
+      retryable: !timeoutError && !abort.signal.aborted && !outputStarted && !!transport?.retryable,
+      ...(transport && { phase: transport.phase, code: transport.code }),
+      partial: outputStarted,
+    });
   } finally {
     clearTimeout(deadline);
     clearInterval(heartbeat);
@@ -208,7 +232,7 @@ function positiveTimeout(value: number | undefined, fallback: number): number {
   return value;
 }
 
-function callUpstream(
+async function callUpstream(
   opts: ProxyOptions,
   creds: Credentials,
   body: string,
@@ -225,7 +249,45 @@ function callUpstream(
     "content-type": "application/json",
   };
   if (sessionId) headers.session_id = sessionId;
-  return fetch(opts.upstreamURL, { method: "POST", headers, body, signal });
+  try {
+    return await fetch(opts.upstreamURL, { method: "POST", headers, body, signal });
+  } catch (err) {
+    throw new TransportError(err, "headers");
+  }
+}
+
+// Classify failures at the I/O boundary, not arbitrary model error text. Node
+// fetch carries socket/TLS codes in cause; Electron exposes Chromium names in
+// the message. In particular, a certificate failure is not a transient outage.
+const TRANSIENT_CODES = new Set([
+  "ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH",
+  "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
+  "ERR_STREAM_PREMATURE_CLOSE", "ERR_HTTP2_PROTOCOL_ERROR", "ERR_HTTP2_SERVER_REFUSED_STREAM",
+  "ERR_HTTP2_PING_FAILED", "ERR_HTTP2_STREAM_CLOSED", "ERR_QUIC_PROTOCOL_ERROR",
+  "ERR_CONNECTION_RESET", "ERR_CONNECTION_CLOSED", "ERR_CONNECTION_ABORTED", "ERR_CONNECTION_REFUSED",
+  "ERR_TIMED_OUT", "ERR_CONNECTION_TIMED_OUT", "ERR_NETWORK_CHANGED", "ERR_INTERNET_DISCONNECTED",
+  "ERR_ADDRESS_UNREACHABLE", "ERR_NAME_NOT_RESOLVED",
+]);
+class TransportError extends Error {
+  readonly code?: string;
+  readonly retryable: boolean;
+  constructor(cause: unknown, readonly phase: "headers" | "body") {
+    super(errorText(cause), { cause });
+    let current = cause;
+    let aborted = false;
+    // Bound traversal even for malformed/circular error causes. Prefer the
+    // underlying cause's code to a generic fetch wrapper code.
+    for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
+      const error = current as { code?: unknown; message?: unknown; name?: unknown; cause?: unknown };
+      aborted ||= error.name === "AbortError";
+      const code = typeof error.code === "string" ? error.code
+        : typeof error.message === "string" ? /^net::(ERR_[A-Z0-9_]+)$/.exec(error.message)?.[1] : undefined;
+      if (code) this.code = code;
+      current = error.cause;
+    }
+    this.retryable = !aborted && (this.code ? TRANSIENT_CODES.has(this.code)
+      : cause instanceof TypeError && cause.message === "fetch failed");
+  }
 }
 
 function readBody(req: http.IncomingMessage): Promise<string> {
@@ -247,20 +309,23 @@ function sendJson(res: http.ServerResponse, status: number, payload: unknown): v
   res.end(JSON.stringify(payload));
 }
 
-function sendError(res: http.ServerResponse, status: number, message: string, retryAfter?: string, deadlineExpired = false): void {
+function sendError(res: http.ServerResponse, status: number, message: string, retryAfter?: string,
+  details: { retryable?: boolean; phase?: string; code?: string; partial?: boolean } = {}): void {
+  const retryable = details.retryable ?? ([408, 409, 429].includes(status) || status >= 500);
+  const error = { message, type: "codex_proxy_error", status, ...details, retryable,
+    ...(retryAfter ? { retry_after: retryAfter } : {}) };
   if (res.headersSent) {
     // The upstream status is unavailable at our earlier SSE handshake. Preserve
     // it in the error envelope so the agent can still distinguish auth/limits.
     // Preserve the SDK's HTTP retry policy after an early SSE handshake. A
     // local deadline is different from an upstream 504: its budget is spent.
-    const retryable = !deadlineExpired && ([408, 409, 429].includes(status) || status >= 500);
-    res.end(`data: ${JSON.stringify({ error: { message, type: "codex_proxy_error", status, retryable, ...(retryAfter ? { retry_after: retryAfter } : {}) } })}\n\n`);
+    res.end(`data: ${JSON.stringify({ error })}\n\n`);
     return;
   }
-  // A deadline already consumed its full wait budget. Retrying it inside the
-  // SDK only repeats a large upload; the user should choose when to try again.
-  if (deadlineExpired) res.setHeader("x-should-retry", "false");
-  sendJson(res, status, { error: { message, type: "codex_proxy_error" } });
+  // Preserve explicit no-retry decisions for non-streaming callers as well:
+  // local deadlines, permanent failures and partial output cannot be replayed.
+  if (!retryable) res.setHeader("x-should-retry", "false");
+  sendJson(res, status, { error });
 }
 
 function errorText(err: unknown): string {
