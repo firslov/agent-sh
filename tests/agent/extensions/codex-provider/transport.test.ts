@@ -174,3 +174,40 @@ test("non-streaming retries discard buffered partial text", async t => {
   assert.equal(result.choices[0]?.message.content, "RECOVERED");
   assert.equal(f.calls(), 2);
 });
+
+for (const type of ["response.completed", "response.done", "response.incomplete"]) {
+  for (const stream of [true, false] as const) {
+    test(`${type} survives cleanup failure after ${stream ? "streaming" : "buffered"} output`, async t => {
+      let cancellations = 0;
+      const f = await fixture(t, () => new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(frame({ type: "response.output_text.delta", delta: "FINISHED" }));
+          controller.enqueue(frame({ type, response: {
+            status: type === "response.incomplete" ? "incomplete" : "completed",
+            usage: { input_tokens: 3, output_tokens: 2 },
+          } }));
+        },
+        async cancel() {
+          cancellations++;
+          throw h2Error();
+        },
+      })));
+      const finishReason = type === "response.incomplete" ? "length" : "stop";
+      if (stream) {
+        const response = await f.client.chat.completions.create({ ...request, stream: true });
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        assert.equal(chunks.map(c => c.choices[0]?.delta.content ?? "").join(""), "FINISHED");
+        assert(chunks.some(c => c.choices[0]?.finish_reason === finishReason));
+        assert(chunks.some(c => c.usage?.total_tokens === 5));
+      } else {
+        const response = await f.client.chat.completions.create({ ...request, stream: false });
+        assert.equal(response.choices[0]?.message.content, "FINISHED");
+        assert.equal(response.choices[0]?.finish_reason, finishReason);
+        assert.equal(response.usage?.total_tokens, 5);
+      }
+      assert.equal(f.calls(), 1, "a completed response must not be retried");
+      assert.equal(cancellations, 1, "still release the unread upstream body");
+    });
+  }
+}

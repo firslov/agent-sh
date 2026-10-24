@@ -161,15 +161,26 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
       }
     }
     async function* checkedEvents() {
-      for await (const event of parseSSE(observedBody())) {
-        yield event;
-        // A terminal event finishes the response, even if a gateway keeps the
-        // HTTP body open. Returning also cancels the unread upstream stream.
-        if (["response.completed", "response.done", "response.incomplete"].includes(event.type)) return;
+      let terminalReceived = false;
+      try {
+        for await (const event of parseSSE(observedBody())) {
+          terminalReceived = ["response.completed", "response.done", "response.incomplete"].includes(event.type);
+          yield event;
+          // A terminal event finishes the response, even if a gateway keeps the
+          // HTTP body open. Returning also cancels the unread upstream stream.
+          if (terminalReceived) return;
+        }
+      } catch (err) {
+        // Iterator cleanup can itself fail when the transport is closing.
+        // Once completion was received, that failure must not discard the
+        // answer or trigger a replay. Errors before completion still propagate.
+        if (!terminalReceived) throw err;
       }
-      throw new TransportError(Object.assign(new Error("Codex upstream stream ended before completion"), {
-        code: "ERR_STREAM_PREMATURE_CLOSE",
-      }), "body");
+      if (!terminalReceived) {
+        throw new TransportError(Object.assign(new Error("Codex upstream stream ended before completion"), {
+          code: "ERR_STREAM_PREMATURE_CLOSE",
+        }), "body");
+      }
     }
     const events = checkedEvents();
 
