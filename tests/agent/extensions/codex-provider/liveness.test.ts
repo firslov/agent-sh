@@ -120,6 +120,51 @@ test("a stalled handshake is bounded and identifies the timeout phase", { timeou
   await f.closed;
 });
 
+for (const refreshAfter401 of [false, true]) {
+  test(`credential refresh ${refreshAfter401 ? "after 401" : "before request"} respects the request deadline`, { timeout: 5000 }, async t => {
+    const pending = () => new Promise<null>(() => {});
+    const f = await fixture(t, res => { res.writeHead(401); res.end(); }, {
+      headersTimeoutMs: 80,
+      ...(refreshAfter401 ? { refreshCredentials: pending } : { getCredentials: pending }),
+    });
+    const response = await fetch(f.proxy.baseURL + "/chat/completions", {
+      method: "POST", headers: { authorization: "Bearer test-only", "content-type": "application/json" },
+      body: JSON.stringify(request), signal: AbortSignal.timeout(500),
+    });
+    assert.equal(response.status, 504);
+    assert.match((await response.json()).error.message, /timed out/);
+    assert.equal(f.requests(), refreshAfter401 ? 1 : 0);
+  });
+
+  test(`cancelling a caller ${refreshAfter401 ? "after 401" : "before request"} preserves shared credential refresh`, { timeout: 5000 }, async t => {
+    let release!: (value: typeof credentials) => void;
+    const shared = new Promise<typeof credentials>(resolve => { release = resolve; });
+    let waiting = 0, ready!: () => void, upstreamCalls = 0;
+    const bothWaiting = new Promise<void>(resolve => { ready = resolve; });
+    const refresh = () => { if (++waiting === 2) ready(); return shared; };
+    const f = await fixture(t, res => {
+      if (refreshAfter401 && ++upstreamCalls <= 2) { res.writeHead(401); res.end(); }
+      else { start(res); finish(res); }
+    }, refreshAfter401 ? { refreshCredentials: refresh } : { getCredentials: refresh });
+    const cancel = new AbortController();
+    const first = fetch(f.proxy.baseURL + "/chat/completions", {
+      method: "POST", headers: { authorization: "Bearer test-only", "content-type": "application/json" },
+      body: JSON.stringify(request), signal: cancel.signal,
+    });
+    const second = f.raw();
+    await bothWaiting;
+    cancel.abort();
+    await assert.rejects(first, { name: "AbortError" });
+    // Give the server's close event a chance to release the first waiter.
+    await delay(30);
+    release(credentials);
+    const response = await second;
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /\[DONE\]/);
+    assert.equal(f.requests(), refreshAfter401 ? 3 : 1, "cancelled caller must not resume upstream work");
+  });
+}
+
 test("non-streaming aggregation also times out and cancels a silent upstream", { timeout: 5000 }, async t => {
   const f = await fixture(t, start, { idleTimeoutMs: 120 });
   const response = await f.raw(false);

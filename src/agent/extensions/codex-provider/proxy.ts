@@ -67,15 +67,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
   }
 
   const chat = JSON.parse(await readBody(req)) as ChatRequest;
-  let creds: Credentials | null;
-  try {
-    creds = await opts.getCredentials();
-  } catch (err) {
-    return sendError(res, 401, `ChatGPT sign-in could not be refreshed (${errorText(err)}). Run /codex-login.`);
-  }
-  if (!creds) return sendError(res, 401, "Not signed in to ChatGPT. Run /codex-login first.");
-
-  if (res.destroyed) return; // The caller may have left while credentials refreshed.
+  if (res.destroyed) return;
   const sessionId = headerValue(req, SESSION_HEADER);
   const body = JSON.stringify(toResponsesRequest(chat, { sessionId }));
   const abort = new AbortController();
@@ -94,12 +86,22 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
   res.on("close", onClose);
 
   try {
+    armDeadline(opts.headersTimeoutMs!, "waiting for credentials");
+    let creds: Credentials | null;
+    try {
+      creds = await waitForCredentials(() => opts.getCredentials(), abort.signal);
+    } catch (err) {
+      if (abort.signal.aborted) throw abort.signal.reason;
+      return sendError(res, 401, `ChatGPT sign-in could not be refreshed (${errorText(err)}). Run /codex-login.`);
+    }
+    if (!creds) return sendError(res, 401, "Not signed in to ChatGPT. Run /codex-login first.");
     armDeadline(opts.headersTimeoutMs!, "waiting for response headers");
     let upstream = await callUpstream(opts, creds, body, sessionId, abort.signal);
     if (upstream.status === 401) {
       await upstream.body?.cancel();
       try {
-        creds = await opts.refreshCredentials(creds.access);
+        const staleAccess = creds.access;
+        creds = await waitForCredentials(() => opts.refreshCredentials(staleAccess), abort.signal);
       } catch (err) {
         if (abort.signal.aborted) throw abort.signal.reason;
         return sendError(res, 401, `ChatGPT sign-in could not be refreshed (${errorText(err)}). Run /codex-login.`);
@@ -169,6 +171,22 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
     clearInterval(heartbeat);
     res.removeListener("close", onClose);
     abort.abort(); // Release any unread upstream body on errors/early returns.
+  }
+}
+
+// Token refresh can be shared by concurrent requests. Stop this caller's wait
+// on timeout/disconnect without cancelling another caller's credential refresh.
+async function waitForCredentials<T>(read: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted();
+  let onAbort!: () => void;
+  const interrupted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([read(), interrupted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
