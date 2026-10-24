@@ -183,3 +183,29 @@ test("an upstream socket failure surfaces after headers and releases the request
   await assert.rejects(async () => { for await (const _ of stream) { /* drain */ } });
   await f.closed;
 });
+
+for (const type of ["response.completed", "response.done", "response.incomplete"]) {
+  for (const stream of [true, false]) {
+    test(`${type} finishes ${stream ? "streaming" : "aggregated"} replies without waiting for upstream EOF`, { timeout: 5000 }, async t => {
+      const f = await fixture(t, res => {
+        start(res);
+        event(res, { type: "response.output_text.delta", delta: "finished" });
+        event(res, { type, response: {
+          status: type === "response.incomplete" ? "incomplete" : "completed",
+          usage: { input_tokens: 4, output_tokens: 2 },
+        } });
+        // The application-level terminal event is authoritative even if a
+        // gateway keeps the HTTP body open or fails while closing it.
+      }, { idleTimeoutMs: 120 });
+      const response = await f.raw(stream);
+      assert.equal(response.status, 200);
+      const text = await response.text();
+      assert(!text.includes('"error"'), text);
+      assert(text.includes("finished"));
+      assert(text.includes('"total_tokens":6'));
+      assert(text.includes(`"finish_reason":"${type === "response.incomplete" ? "length" : "stop"}"`));
+      if (stream) assert(text.includes("[DONE]"));
+      await f.closed;
+    });
+  }
+}

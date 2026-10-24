@@ -125,12 +125,13 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
       }
     }
     async function* checkedEvents() {
-      let completed = false;
       for await (const event of parseSSE(observedBody())) {
-        if (["response.completed", "response.done", "response.incomplete"].includes(event.type)) completed = true;
         yield event;
+        // A terminal event finishes the response, even if a gateway keeps the
+        // HTTP body open. Returning also cancels the unread upstream stream.
+        if (["response.completed", "response.done", "response.incomplete"].includes(event.type)) return;
       }
-      if (!completed) throw new Error("Codex upstream stream ended before completion");
+      throw new Error("Codex upstream stream ended before completion");
     }
     const events = checkedEvents();
 
