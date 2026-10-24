@@ -5,6 +5,8 @@ import type { AddressInfo } from "node:net";
 import { once } from "node:events";
 import OpenAI from "openai";
 import { startProxy, type ProxyOptions } from "../../../../src/agent/extensions/codex-provider/proxy.js";
+import { llmErrorStatus } from "../../../../src/agent/llm-client.js";
+import { AgentLoop } from "../../../../src/agent/agent-loop.js";
 
 const request = { model: "test-model", messages: [{ role: "user" as const, content: "hello" }], stream: true as const };
 const credentials = { access: "fake-access", refresh: "fake-refresh", accountId: "fake-account", expires: Date.now() + 3600000 };
@@ -36,7 +38,7 @@ async function fixture(t: TestContext, respond: (res: http.ServerResponse) => vo
   const proxy = await startProxy({
     secret: "test-only", upstreamURL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/responses`,
     originator: "test", getCredentials: async () => credentials, refreshCredentials: async () => null,
-    heartbeatIntervalMs: 20, idleTimeoutMs: 1500, headersTimeoutMs: 1500, ...options,
+    heartbeatIntervalMs: 20, idleTimeoutMs: 1500, headersTimeoutMs: 1500, credentialsTimeoutMs: 1500, ...options,
   });
   t.after(async () => {
     await proxy.close();
@@ -64,6 +66,19 @@ test("flushes headers before translated output; SDK neither times out nor retrie
   for await (const chunk of stream) content += chunk.choices[0]?.delta.content ?? "";
   assert.equal(content, "done");
   assert.equal(f.requests(), 1);
+});
+
+test("keeps the SDK connected while uploading or waiting for upstream headers", { timeout: 5000 }, async t => {
+  const f = await fixture(t, res => {
+    const timer = setTimeout(() => { start(res); finish(res); }, 450);
+    res.on("close", () => clearTimeout(timer));
+  });
+  const client = new OpenAI({ apiKey: "test-only", baseURL: f.proxy.baseURL, timeout: 150, maxRetries: 0 });
+  const stream = await client.chat.completions.create(request);
+  let content = "";
+  for await (const chunk of stream) content += chunk.choices[0]?.delta.content ?? "";
+  assert.equal(content, "done");
+  assert.equal(f.requests(), 1, "slow uploads must not start duplicate model requests");
 });
 
 test("emits invisible keepalives while reasoning is silent", { timeout: 5000 }, async t => {
@@ -115,24 +130,100 @@ test("SDK surfaces stream inactivity as an error, not a successful empty answer"
 test("a stalled handshake is bounded and identifies the timeout phase", { timeout: 5000 }, async t => {
   const f = await fixture(t, () => {}, { headersTimeoutMs: 120 });
   const response = await f.raw();
-  assert.equal(response.status, 504);
-  assert.match((await response.json()).error.message, /waiting for response headers after 0.12s/);
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  assert.match(text, /waiting for response headers after 0.12s/);
+  assert.match(text, /"status":504/);
+  assert(!text.includes("[DONE]"));
   await f.closed;
+});
+
+test("a header deadline does not silently re-upload through SDK retries", { timeout: 5000 }, async t => {
+  const f = await fixture(t, () => {}, { headersTimeoutMs: 100 });
+  const client = new OpenAI({ apiKey: "test-only", baseURL: f.proxy.baseURL });
+  const stream = await client.chat.completions.create(request);
+  await assert.rejects(async () => { for await (const _ of stream) {} }, (e: unknown) => {
+    assert.equal(llmErrorStatus(e), 504);
+    assert.equal((AgentLoop.prototype as any).isRetryable(e), false);
+    return true;
+  });
+  assert.equal(f.requests(), 1);
+  await f.closed;
+});
+
+test("non-streaming header deadlines also disable hidden SDK retries", { timeout: 5000 }, async t => {
+  const f = await fixture(t, () => {}, { headersTimeoutMs: 100 });
+  const client = new OpenAI({ apiKey: "test-only", baseURL: f.proxy.baseURL });
+  await assert.rejects(client.chat.completions.create({ ...request, stream: false }), (e: unknown) => llmErrorStatus(e) === 504);
+  assert.equal(f.requests(), 1);
+  await f.closed;
+});
+
+test("cancel during header wait releases upstream without resuming work", { timeout: 5000 }, async t => {
+  const f = await fixture(t, () => {});
+  const controller = new AbortController();
+  const stream = await f.client.chat.completions.create(request, { signal: controller.signal });
+  // Wait until the upload reaches upstream, then cancel before its headers.
+  while (!f.requests()) await delay(5);
+  controller.abort();
+  try { for await (const _ of stream) {} } catch { /* expected cancellation */ }
+  await f.closed;
+  assert.equal(f.requests(), 1);
+});
+
+for (const status of [400, 401, 403, 408, 409, 429, 500, 501, 503, 504, 529]) {
+  test(`early SSE preserves upstream ${status} and retry policy`, { timeout: 5000 }, async t => {
+    const f = await fixture(t, res => {
+      res.writeHead(status, { "content-type": "application/json", "retry-after": "7" });
+      res.end(JSON.stringify({ error: { message: "upstream fixture" } }));
+    });
+    const stream = await f.client.chat.completions.create(request);
+    await assert.rejects(async () => { for await (const _ of stream) {} }, (e: unknown) => {
+      assert.equal(llmErrorStatus(e), status);
+      const loop = AgentLoop.prototype as any;
+      assert.equal(loop.isRetryable(e), [408, 409, 429].includes(status) || status >= 500);
+      if (status === 429) assert.equal(loop.getRetryDelay(e, 0), 7000);
+      return true;
+    });
+  });
+}
+
+test("early SSE honors date-form Retry-After and rejects invalid timer delays", { timeout: 5000 }, async t => {
+  const now = Date.now();
+  const retryAt = new Date(Math.ceil(now / 1000) * 1000 + 7000).toUTCString();
+  const f = await fixture(t, res => {
+    res.writeHead(429, { "retry-after": retryAt });
+    res.end(JSON.stringify({ error: { message: "limited" } }));
+  });
+  const stream = await f.client.chat.completions.create(request);
+  await assert.rejects(async () => { for await (const _ of stream) {} }, (e: unknown) => {
+    t.mock.method(Date, "now", () => now);
+    const loop = AgentLoop.prototype as any;
+    assert.equal(loop.getRetryDelay(e, 0), Date.parse(retryAt) - now);
+    const error = e as { error: { retry_after: string } };
+    error.error.retry_after = "0.5";
+    assert.equal(loop.getRetryDelay(e, 0), 500);
+    for (const invalid of ["-1", "99999999999", "invalid", "7garbage"]) {
+      error.error.retry_after = invalid;
+      assert.equal(loop.getRetryDelay(e, 2), 4000);
+    }
+    return true;
+  });
 });
 
 for (const refreshAfter401 of [false, true]) {
   test(`credential refresh ${refreshAfter401 ? "after 401" : "before request"} respects the request deadline`, { timeout: 5000 }, async t => {
     const pending = () => new Promise<null>(() => {});
     const f = await fixture(t, res => { res.writeHead(401); res.end(); }, {
-      headersTimeoutMs: 80,
+      headersTimeoutMs: 80, credentialsTimeoutMs: 80,
       ...(refreshAfter401 ? { refreshCredentials: pending } : { getCredentials: pending }),
     });
     const response = await fetch(f.proxy.baseURL + "/chat/completions", {
       method: "POST", headers: { authorization: "Bearer test-only", "content-type": "application/json" },
       body: JSON.stringify(request), signal: AbortSignal.timeout(500),
     });
-    assert.equal(response.status, 504);
-    assert.match((await response.json()).error.message, /timed out/);
+    assert.equal(response.status, refreshAfter401 ? 200 : 504);
+    assert.match(await response.text(), /timed out/);
     assert.equal(f.requests(), refreshAfter401 ? 1 : 0);
   });
 
@@ -154,7 +245,9 @@ for (const refreshAfter401 of [false, true]) {
     const second = f.raw();
     await bothWaiting;
     cancel.abort();
-    await assert.rejects(first, { name: "AbortError" });
+    // Once SSE has been acknowledged, cancellation rejects body consumption
+    // rather than the already-resolved fetch promise.
+    await assert.rejects(first.then(response => response.text()), { name: "AbortError" });
     // Give the server's close event a chance to release the first waiter.
     await delay(30);
     release(credentials);
@@ -187,6 +280,7 @@ test("closing the proxy cancels active streams and resolves promptly", { timeout
   const f = await fixture(t, start);
   const response = await f.raw();
   const body = response.text().catch(() => "closed");
+  while (!f.requests()) await delay(5);
   await f.proxy.close();
   await f.closed;
   await body;
