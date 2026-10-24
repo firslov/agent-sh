@@ -22,6 +22,10 @@ export interface ProxyOptions {
   getCredentials: () => Promise<Credentials | null>;
   /** Refresh after the upstream rejected `staleAccess`. */
   refreshCredentials: (staleAccess: string) => Promise<Credentials | null>;
+  /** Transport limits; progress means upstream bytes, not downstream heartbeats. */
+  headersTimeoutMs?: number;
+  idleTimeoutMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 export interface Proxy {
@@ -30,6 +34,10 @@ export interface Proxy {
 }
 
 export async function startProxy(opts: ProxyOptions): Promise<Proxy> {
+  const headersTimeoutMs = positiveTimeout(opts.headersTimeoutMs, 120_000);
+  const idleTimeoutMs = positiveTimeout(opts.idleTimeoutMs, 30 * 60_000);
+  const heartbeatIntervalMs = positiveTimeout(opts.heartbeatIntervalMs, 15_000);
+  opts = { ...opts, headersTimeoutMs, idleTimeoutMs, heartbeatIntervalMs };
   const server = http.createServer((req, res) => {
     handle(req, res, opts).catch((err) => sendError(res, 502, errorText(err)));
   });
@@ -41,7 +49,11 @@ export async function startProxy(opts: ProxyOptions): Promise<Proxy> {
   const { port } = server.address() as AddressInfo;
   return {
     baseURL: `http://127.0.0.1:${port}/v1`,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () => new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      // Closing a session must also cancel active upstream requests.
+      server.closeAllConnections();
+    }),
   };
 }
 
@@ -63,48 +75,108 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
   }
   if (!creds) return sendError(res, 401, "Not signed in to ChatGPT. Run /codex-login first.");
 
+  if (res.destroyed) return; // The caller may have left while credentials refreshed.
   const sessionId = headerValue(req, SESSION_HEADER);
   const body = JSON.stringify(toResponsesRequest(chat, { sessionId }));
   const abort = new AbortController();
-  res.on("close", () => {
-    if (!res.writableFinished) abort.abort();
-  });
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let timeoutError: Error | undefined;
+  const armDeadline = (ms: number, phase: string) => {
+    clearTimeout(deadline);
+    deadline = setTimeout(() => {
+      timeoutError = new Error(`Codex upstream timed out ${phase} after ${ms / 1000}s`);
+      abort.abort(timeoutError);
+    }, ms);
+    deadline.unref();
+  };
+  const onClose = () => { if (!res.writableFinished) abort.abort(); };
+  res.on("close", onClose);
 
-  let upstream = await callUpstream(opts, creds, body, sessionId, abort.signal);
-  if (upstream.status === 401) {
-    try {
-      creds = await opts.refreshCredentials(creds.access);
-    } catch (err) {
-      return sendError(res, 401, `ChatGPT sign-in could not be refreshed (${errorText(err)}). Run /codex-login.`);
-    }
-    if (!creds) return sendError(res, 401, "ChatGPT session expired. Run /codex-login again.");
-    upstream = await callUpstream(opts, creds, body, sessionId, abort.signal);
-  }
-  if (!upstream.ok || !upstream.body) {
-    return sendError(res, upstream.status || 502, upstreamErrorMessage(upstream.status, await upstream.text()));
-  }
-
-  const translator = new CodexStreamTranslator(chat.model);
-  const events = parseSSE(upstream.body as unknown as AsyncIterable<Uint8Array>);
-
-  if (!chat.stream) {
-    const chunks: ChatChunk[] = [];
-    for await (const event of events) chunks.push(...translator.push(event));
-    chunks.push(...translator.end());
-    return sendJson(res, 200, aggregate(chunks));
-  }
-
-  res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-  const write = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
   try {
+    armDeadline(opts.headersTimeoutMs!, "waiting for response headers");
+    let upstream = await callUpstream(opts, creds, body, sessionId, abort.signal);
+    if (upstream.status === 401) {
+      await upstream.body?.cancel();
+      try {
+        creds = await opts.refreshCredentials(creds.access);
+      } catch (err) {
+        if (abort.signal.aborted) throw abort.signal.reason;
+        return sendError(res, 401, `ChatGPT sign-in could not be refreshed (${errorText(err)}). Run /codex-login.`);
+      }
+      if (abort.signal.aborted) throw abort.signal.reason;
+      if (!creds) return sendError(res, 401, "ChatGPT session expired. Run /codex-login again.");
+      upstream = await callUpstream(opts, creds, body, sessionId, abort.signal);
+    }
+    if (!upstream.ok || !upstream.body) {
+      return sendError(res, upstream.status || 502, upstreamErrorMessage(upstream.status, await upstream.text()));
+    }
+
+    const translator = new CodexStreamTranslator(chat.model);
+    const upstreamBody = upstream.body;
+    const resetIdle = () => armDeadline(opts.idleTimeoutMs!, "waiting for stream data");
+    resetIdle();
+    // Count even SSE comments and untranslatable events as upstream activity.
+    // Our own keepalives must never extend the upstream inactivity deadline.
+    async function* observedBody() {
+      for await (const bytes of upstreamBody as unknown as AsyncIterable<Uint8Array>) {
+        if (bytes.length) resetIdle();
+        yield bytes;
+      }
+    }
+    async function* checkedEvents() {
+      let completed = false;
+      for await (const event of parseSSE(observedBody())) {
+        if (["response.completed", "response.done", "response.incomplete"].includes(event.type)) completed = true;
+        yield event;
+      }
+      if (!completed) throw new Error("Codex upstream stream ended before completion");
+    }
+    const events = checkedEvents();
+
+    if (!chat.stream) {
+      const chunks: ChatChunk[] = [];
+      for await (const event of events) chunks.push(...translator.push(event));
+      chunks.push(...translator.end());
+      return sendJson(res, 200, aggregate(chunks));
+    }
+
+    // writeHead alone buffers headers until the first translated chunk. Long
+    // reasoning can therefore hit the loopback client's headers timeout and
+    // silently restart an otherwise healthy upstream request.
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+    res.flushHeaders();
+    heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded && !res.writableLength) res.write(": keepalive\n\n");
+    }, opts.heartbeatIntervalMs!);
+    heartbeat.unref();
+    const write = (payload: unknown) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
     for await (const event of events) for (const chunk of translator.push(event)) write(chunk);
     for (const chunk of translator.end()) write(chunk);
-    res.write("data: [DONE]\n\n");
+    res.end("data: [DONE]\n\n");
   } catch (err) {
-    // headers already sent; the SDK raises on an error payload
-    if (!abort.signal.aborted) write({ error: { message: errorText(err), type: "codex_error" } });
+    if (res.destroyed) return;
+    const message = errorText(timeoutError ?? err);
+    if (res.headersSent) {
+      // Errors after the SSE handshake must remain errors, never partial success.
+      res.end(`data: ${JSON.stringify({ error: { message, type: "codex_error" } })}\n\n`);
+    } else {
+      sendError(res, timeoutError ? 504 : 502, message);
+    }
+  } finally {
+    clearTimeout(deadline);
+    clearInterval(heartbeat);
+    res.removeListener("close", onClose);
+    abort.abort(); // Release any unread upstream body on errors/early returns.
   }
-  res.end();
+}
+
+function positiveTimeout(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isFinite(value) || value <= 0 || value > 2_147_483_647) {
+    throw new Error("Codex proxy timeouts must be positive finite milliseconds");
+  }
+  return value;
 }
 
 function callUpstream(
