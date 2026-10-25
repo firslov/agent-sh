@@ -8,6 +8,25 @@ Releases before this file are recorded in the git tags and GitHub releases.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-25
+
+### Fixed
+
+- Codex requests no longer time out during slow uploads or silent reasoning,
+  and a completed answer is no longer discarded when the upstream connection
+  closes untidily (#281, thanks @firslov). The proxy acknowledges the SSE
+  stream right after local authentication and keeps the client connected with
+  heartbeats while upstream work continues; credential, upload and stream-idle
+  deadlines are separate and configurable (`credentialsTimeoutMs`,
+  `headersTimeoutMs`, `idleTimeoutMs`). Transient connection failures are
+  retried once, but only before any text, reasoning or tool output has been
+  sent, so a recovery never replays partial output; cancellation, certificate
+  failures and spent local deadlines are never retried. Cancellation now
+  also reaches in-progress retry waits, and a shared token refresh survives
+  one of its waiters going away.
+- Retry waits for a failed request now release their abort listener instead
+  of accumulating one per attempt.
+
 ## [0.16.0] - 2026-10-21
 
 ### Added
