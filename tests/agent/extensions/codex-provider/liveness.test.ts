@@ -163,7 +163,6 @@ test("cancel during header wait releases upstream without resuming work", { time
   const f = await fixture(t, () => {});
   const controller = new AbortController();
   const stream = await f.client.chat.completions.create(request, { signal: controller.signal });
-  // Wait until the upload reaches upstream, then cancel before its headers.
   while (!f.requests()) await delay(5);
   controller.abort();
   try { for await (const _ of stream) {} } catch { /* expected cancellation */ }

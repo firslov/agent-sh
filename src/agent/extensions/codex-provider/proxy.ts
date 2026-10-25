@@ -135,8 +135,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse, opts:
       try { errorBody = await upstream.text(); }
       catch (err) {
         if (abort.signal.aborted) throw err;
-        // A broken error body must not erase a known 4xx/5xx status or its
-        // retry policy. No model output has been sent on this path.
+        // A broken error body must not erase a known 4xx/5xx status or its retry policy.
       }
       return sendError(res, upstream.status, upstreamErrorMessage(upstream.status, errorBody), upstream.headers.get("retry-after") ?? undefined);
     }
@@ -328,8 +327,7 @@ function sendError(res: http.ServerResponse, status: number, message: string, re
   if (res.headersSent) {
     // The upstream status is unavailable at our earlier SSE handshake. Preserve
     // it in the error envelope so the agent can still distinguish auth/limits.
-    // Preserve the SDK's HTTP retry policy after an early SSE handshake. A
-    // local deadline is different from an upstream 504: its budget is spent.
+    // A local deadline is different from an upstream 504: its budget is spent.
     res.end(`data: ${JSON.stringify({ error })}\n\n`);
     return;
   }
