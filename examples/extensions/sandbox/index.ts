@@ -67,6 +67,16 @@ export default function activate(ctx: ExtensionContext): void {
     if (mode === "off" || isolated) return p;
     const b = osSandbox();
     if (!b.ok) return p;
+    // Bubblewrap gives the run a private /tmp, so a run file or write dir there would vanish inside it.
+    // Checked here because run:checks only fires inside the restarted run.
+    if (b.kind === "bubblewrap") {
+      const inTmp = (dir: string) => dir === "/tmp" || dir.startsWith("/tmp/");
+      const bad = [run.base, ...write].filter(inTmp);
+      if (bad.length) {
+        console.error(`agent-sh run: ${bad.join(", ")} under /tmp, which is private inside the bubblewrap sandbox; put the run file and write dirs elsewhere.`);
+        process.exit(2);
+      }
+    }
     if (b.kind === "seatbelt") return { ...p, argv: seatbeltArgv(b.path!, { write, hide, home: HOME }, p.argv) };
     const wrapper = b.kind === "landlock" ? [b.path!, path.join(HERE, "landlock.py")] : [path.join(HERE, "sandbox.sh")];
     const args = [...wrapper, "--home", HOME, ...write.flatMap(w => ["--rw", w]), ...hide.flatMap(h => ["--hide", h])];
