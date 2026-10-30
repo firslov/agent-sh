@@ -278,10 +278,17 @@ function page(res: http.ServerResponse, status: number, message: string): void {
 }
 
 export function openBrowser(url: string): void {
+  const windows = process.platform === "win32";
+  // cmd /c start treats OAuth query separators (&) as commands. Keep the URL
+  // out of shell source entirely, including quotes and percent-encoded values.
   const [cmd, args] = process.platform === "darwin" ? ["open", [url]]
-    : process.platform === "win32" ? ["cmd", ["/c", "start", "", url]]
+    : windows ? ["powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "Start-Process -FilePath $env:AGENT_SH_CODEX_LOGIN_URL"]]
     : ["xdg-open", [url]];
   try {
-    spawn(cmd, args as string[], { stdio: "ignore", detached: true }).on("error", () => {}).unref();
+    spawn(cmd, args as string[], {
+      stdio: "ignore", detached: true,
+      ...(windows ? { windowsHide: true, env: { ...process.env, AGENT_SH_CODEX_LOGIN_URL: url } } : {}),
+    }).on("error", () => {}).unref();
   } catch { /* the URL is also printed for manual use */ }
 }
